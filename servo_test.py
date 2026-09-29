@@ -93,6 +93,72 @@ settei_yomikomi()
 
 
 # ==============================================================================
+# Raspberry Pi 5 用の信号出力（pigpio が使えない Pi 5 のための代わり）
+#   Pi 4 では pigpio が使えるので、この仕組みは使われない（動作は変わらない）。
+#   Pi 5 では Linux標準のハードウェアPWMを使う。事前に
+#   /boot/firmware/config.txt の最後に次の1行を書いて再起動しておくこと:
+#     dtoverlay=pwm-2chan,pin=12,func=4,pin2=13,func2=4
+# ==============================================================================
+class Pi5PWM:
+    """pigpio と同じ呼び方 hardware_PWM(GPIO番号, 周波数, デューティ[100万分率]) で使える"""
+    CHANNEL = {12: 0, 13: 1}          # GPIO12 = チャンネル0、GPIO13 = チャンネル1
+
+    def __init__(self):
+        import glob
+        self.chip = None
+        kouho = sorted(glob.glob("/sys/class/pwm/pwmchip*"))
+        for c in kouho:                                 # Pi 5 の GPIO12/13 用PWMを優先
+            if "1f00098000" in os.path.realpath(c):
+                self.chip = c
+                break
+        if self.chip is None:
+            for c in kouho:
+                try:
+                    if int(open(c + "/npwm").read()) >= 2:
+                        self.chip = c
+                        break
+                except Exception:
+                    pass
+        if self.chip is None:
+            raise RuntimeError("ハードウェアPWMが見つかりません（config.txt の設定と再起動を確認）")
+        if not os.access(self.chip + "/export", os.W_OK):
+            raise RuntimeError("PWMを操作する権限がありません（sudo をつけて起動してください）")
+        self.connected = True
+        self._shuki = {}
+
+    def _kaku(self, path, atai):
+        for _ in range(50):                             # 準備直後は書けるまで少し待つ
+            try:
+                with open(path, "w") as f:
+                    f.write(str(atai))
+                return
+            except (PermissionError, FileNotFoundError):
+                time.sleep(0.05)
+        raise RuntimeError(f"書き込めません: {path}")
+
+    def hardware_PWM(self, gpio, shuhasu, duty_man):
+        ch = self.CHANNEL[gpio]
+        d = f"{self.chip}/pwm{ch}"
+        if not os.path.exists(d):
+            self._kaku(self.chip + "/export", ch)
+        if shuhasu == 0:                                # 0 = 信号を止める
+            self._kaku(d + "/enable", 0)
+            return
+        shuki = int(1_000_000_000 / shuhasu)            # 周期[ナノ秒]
+        if self._shuki.get(ch) != shuki:
+            try:
+                self._kaku(d + "/duty_cycle", 0)        # 周期を変える前にデューティを0に
+            except Exception:
+                pass
+            self._kaku(d + "/period", shuki)
+            self._shuki[ch] = shuki
+        self._kaku(d + "/duty_cycle", int(shuki * duty_man / 1_000_000))
+        self._kaku(d + "/enable", 1)
+
+    def stop(self):
+        pass
+
+# ==============================================================================
 # ブロック2: サーボへの信号出力（pigpioライブラリを使用）
 # ==============================================================================
 
@@ -108,7 +174,13 @@ class Servo:
             print("[サーボ] pigpio に接続しました（実機モード）")
         except Exception as e:
             print(f"[サーボ] pigpio が使えません ({e})")
-            print("[サーボ] 画面表示だけのテストモードで動きます")
+            try:
+                self.pi = Pi5PWM()
+                print("[サーボ] Pi 5 のハードウェアPWMで出力します（実機モード）")
+            except Exception as e2:
+                self.pi = None
+                print(f"[サーボ] Pi 5 用の出力も使えません ({e2})")
+                print("[サーボ] 画面表示だけのテストモードで動きます")
 
     def shingou(self, duty):
         """duty[%] の信号を出す。安全リミットの外は絶対に出さない"""
