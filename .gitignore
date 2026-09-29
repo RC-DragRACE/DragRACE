@@ -1,0 +1,13 @@
+# ---- 車ごとの設定（各車の servo_test / throttle_test が保存する。配布しない） ----
+kuruma_settei.json
+
+# ---- 走行記録（csv / mp4 / _settei.json。容量が大きいので管理しない） ----
+logs/
+
+# ---- バックアップ（gitの履歴があるので不要） ----
+*.bak
+*.bak_*
+
+# ---- Pythonが自動で作るファイル ----
+__pycache__/
+*.pyc
