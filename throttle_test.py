@@ -72,8 +72,9 @@ ZENSHIN_SAIDAI_BYO = 10.0   # 前進をこの秒数で自動的にNへ戻す（�
 GAKUSHU_HANI = 1.50    # 学習モードで動かせる範囲: N±この値[%]（安全装置）
 BICHOSEI_SAIDAI = 0.10 # 微調整ボタン1回で動かせる上限[%]（安全策）
 
-# ---- タイヤエンコーダ（基準車のみ搭載。学生車は False にする） ----
-ENCODER_ARI = True     # ★ エンコーダ搭載車は True、非搭載車は False
+# ---- タイヤエンコーダ（基準車のみ搭載） ----
+ENCODER_ARI = False    # エンコーダの有無（個別設定項目）。初期値は「無し」。
+                       # 搭載車だけ kuruma_settei.json に "ENCODER_ARI": true と書く
 ENCODER_GPIO = 22      # エンコーダのパルス入力ピン
 ENCODER_PPR = 36       # タイヤ1回転あたりのパルス数
 
