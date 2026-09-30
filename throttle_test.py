@@ -54,8 +54,15 @@ PWM_SHUHASU = 70       # 信号の周波数[Hz]。変えないこと
 N_KIJUN = 10.48        # 学習前に仮で使うNポジション[%]
                        # 学習後は「(D点+R点)÷2」の計算値に置き換わる
 
-# この車両構成では実測により「低い%＝前進、高い%＝後退」と判明している
-# （D点はNより低い側、R点はNより高い側にある）
+SUROTTORU_GYAKU = True  # スロットルの向き（個別設定項目）
+                        #   True  = 低い%で前進、高い%で後退（タミヤ TT-02 の実測）
+                        #   False = 高い%で前進、低い%で後退（ヨコモ RD2.0 の実測）
+                        #   違う車では kuruma_settei.json に "SUROTTORU_GYAKU": false と書く
+
+def zen():
+    """前進側の向き: 前進が低い%なら -1、高い%なら +1"""
+    return -1 if SUROTTORU_GYAKU else 1
+
 BISOKU_HABA = 0.50     # 学習前の微速前進の張り出し[%]。学習後はD点−0.20を使う
 BISOKU_D_OFFSET = 0.20 # 学習後の微速前進: D点からさらに前進側へ出す量[%]
 BRAKE_HABA = 1.00      # ブレーキの張り出し[%]（Nから後退側へ）
@@ -323,7 +330,7 @@ class App:
             if self.mode != "normal" or self.tan_jikko or self.ichi == "brake":
                 return
             # 学習済みなら「D点よりさらに0.20前進側」= 不感帯を確実に越えた微速
-            duty = (self.d_ten - BISOKU_D_OFFSET) if self.d_ten else (self.n - BISOKU_HABA)
+            duty = (self.d_ten + zen() * BISOKU_D_OFFSET) if self.d_ten else (self.n + zen() * BISOKU_HABA)
             self.ichi = "zenshin"
             self.jido_teishi_yotei = time.time() + ZENSHIN_SAIDAI_BYO
             self.ima_duty = self.esc.shingou(duty)
@@ -335,7 +342,7 @@ class App:
                 return
             self.ichi = "brake"
             self.jido_teishi_yotei = None
-            self.ima_duty = self.esc.shingou(self.n + BRAKE_HABA)
+            self.ima_duty = self.esc.shingou(self.n - zen() * BRAKE_HABA)
             print(f"[操作] ブレーキ: {self.ima_duty:.2f}% （{BRAKE_BYO:.0f}秒後にN）")
         threading.Thread(target=self._brake_modoshi, daemon=True).start()
 
@@ -408,7 +415,7 @@ class App:
         try:
             # --- 段階1: 前進境界（D点） ---
             print("[学習] まずは前進の学習を始めます。")
-            print("[学習] ◀ボタンで出力を少しずつ下げてください。")
+            print("[学習] " + ("◀ボタンで出力を少しずつ下げて" if SUROTTORU_GYAKU else "▶ボタンで出力を少しずつ上げて") + "ください。")
             print("[学習] タイヤが前進方向に回り始めたら「回り始めた!」を押してください。")
             d = self._osareru_made_matsu()
             with self.lock:
@@ -422,7 +429,7 @@ class App:
                 self.gaku_phase = "kaijo"
             print("[学習] 次に後退の学習を始めます。後退モードへ切替中...")
             with self.lock:
-                self.ima_duty = self.esc.shingou(n0 + BRAKE_HABA)
+                self.ima_duty = self.esc.shingou(n0 - zen() * BRAKE_HABA)   # 後退側へ一瞬
             time.sleep(0.5)
             with self.lock:
                 self.ima_duty = self.esc.shingou(n0)
@@ -433,7 +440,7 @@ class App:
                 self.gaku_phase = "r"
 
             # --- 段階3: 後退境界（R点） ---
-            print("[学習] ▶ボタンで出力を少しずつ上げてください。")
+            print("[学習] " + ("▶ボタンで出力を少しずつ上げて" if SUROTTORU_GYAKU else "◀ボタンで出力を少しずつ下げて") + "ください。")
             print("[学習] タイヤが後退方向に回り始めたら「回り始めた!」を押してください。")
             r = self._osareru_made_matsu()
             with self.lock:
@@ -521,7 +528,7 @@ class App:
                         print("[探索] 中止されました")
                         break
                     self.tan_kaido = kaido
-                    self.ima_duty = self.esc.shingou(self.n - kaido)  # 前進は低い側
+                    self.ima_duty = self.esc.shingou(self.n + zen() * kaido)  # 前進側へ
                 print(f"[探索] 開度 {kaido:.2f}% を保持中...")
 
                 # 保持（0.1秒刻みで中止フラグを確認しながら待つ）
