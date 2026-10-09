@@ -54,10 +54,10 @@ PWM_SHUHASU = 70       # 信号の周波数[Hz]。変えないこと
 N_KIJUN = 10.48        # 学習前に仮で使うNポジション[%]
                        # 学習後は「(D点+R点)÷2」の計算値に置き換わる
 
-SUROTTORU_GYAKU = True  # スロットルの向き（個別設定項目）
+SUROTTORU_GYAKU = False # スロットルの向き（個別設定項目）
                         #   True  = 低い%で前進、高い%で後退（タミヤ TT-02 の実測）
                         #   False = 高い%で前進、低い%で後退（ヨコモ RD2.0 の実測）
-                        #   違う車では kuruma_settei.json に "SUROTTORU_GYAKU": false と書く
+                        #   TT-02 で使うときは kuruma_settei.json に "SUROTTORU_GYAKU": true と書く
 
 def zen():
     """前進側の向き: 前進が低い%なら -1、高い%なら +1"""

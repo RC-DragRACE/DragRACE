@@ -2,7 +2,7 @@
   "# ============ 学習値（テストツールが自動で書き込む） ============": "",
   "# STEER_CHURITSU は servo_test、ZENSHIN_KYOKAI / KOTAI_KYOKAI / THROTTLE_N は throttle_test が保存する": "",
   "# この見本には入れていない。自分の車で調整して保存すると、このファイルに自動で追記される": "",
-  "SUROTTORU_GYAKU": true,
+  "SUROTTORU_GYAKU": false,
   "#  ↑スロットルの向き": "true=低い%で前進(タミヤTT-02) / false=高い%で前進(ヨコモRD2.0)。throttle_testとrc_raceの両方に効く",
 
   "HANDORU_GYAKU": false,

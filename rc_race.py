@@ -220,7 +220,7 @@ STEER_HOJI_HIROGARI = 0.35  # ラインの色が横方向に画面のこの割�
 # ------------------------------------------------------------------------------
 # スロットルの向きとブレーキ
 # ------------------------------------------------------------------------------
-SUROTTORU_GYAKU = True  # スロットルの向き（個別設定項目）
+SUROTTORU_GYAKU = False # スロットルの向き（個別設定項目）
                         #   True  = 低い%で前進（タミヤ TT-02 の実測）
                         #   False = 高い%で前進（ヨコモ RD2.0 の実測）
                         #   throttle_test と同じ値を kuruma_settei.json に書くこと
@@ -870,7 +870,9 @@ class RaceApp:
             "ACCEL_RAMPU": ACCEL_RAMPU,
             "STEER_P_GAIN": STEER_P_GAIN, "STEER_D_GAIN": STEER_D_GAIN,
             "BRAKE": BRAKE, "SAIDAI_SOKO_BYO": SAIDAI_SOKO_BYO,
-            "HANDORU_GYAKU": HANDORU_GYAKU, "KURO_SHIKII": KURO_SHIKII,
+            "HANDORU_GYAKU": HANDORU_GYAKU,
+            "LINE_IRO": LINE_IRO,
+            "KURO_SHIKII": KURO_SHIKII, "SHIRO_SHIKII": SHIRO_SHIKII,
             "TSUIZUI_GATE": TSUIZUI_GATE,
             "STEER_CHURITSU": self.teashi.steer_churitsu,
             "ZENSHIN_KYOKAI": self.teashi.d_ten,
