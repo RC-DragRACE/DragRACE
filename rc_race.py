@@ -654,6 +654,9 @@ class TeAshi:
 
         self._brake_chu = False
         self.neutral()
+        if self.pi is not None:
+            print(f"[手足] N {self.ima_throttle:.2f}% を出力中。ESCの電源は、この表示のあとに入れてください。")
+            print("[手足] （ESCは電源を入れた瞬間の信号をニュートラルとして覚えます。先に入れていたら入れ直す）")
 
     # --- 低レベル出力（安全リミット付き） ---
     def _dasu(self, gpio, duty):

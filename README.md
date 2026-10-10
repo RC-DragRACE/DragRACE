@@ -39,6 +39,8 @@ cp kuruma_settei_sample.json kuruma_settei.json
 4. `python3 rc_race.py` — 走行（2と3が済んでいない車は、安全のため走行開始できません）
 
 いずれもブラウザで `http://<車のIPアドレス>:8080` を開いて操作します。
+
+**ESCの電源は、`throttle_test.py` や `rc_race.py` を起動したあとに入れてください。** ESCは電源を入れた瞬間の信号を「停止位置」として覚えます。順番が逆だと、学習した値がずれます。
 詳しくは `docs/` の各説明書を読んでください。
 
 ## 最新版に更新するとき

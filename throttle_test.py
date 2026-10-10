@@ -14,7 +14,10 @@
 #      フェーズ1: スロットル学習 —— ATのシフトレンジにたとえると:
 #          D点 = 前進し始める境界（ここより前進側で駆動がつながる）
 #          R点 = 後退し始める境界（ここより後退側で駆動がつながる）
-#          N   = D点とR点のちょうど中間（確実に止まる位置・自動計算）
+#          N   = 停止の信号。車ごとに決まった値で、学習では変えない。
+#                ESCは「電源を入れた瞬間に届いている信号」をニュートラルとして
+#                覚える。だから必ず、このプログラムを起動してNを出してから
+#                ESCの電源を入れること（先に入れていたら入れ直す）
 #          L点 = モーターから「ピー」と音が鳴り始める点（D点の少し手前）。
 #                動き出したあとは、ここまで下げても回り続ける。
 #                本番プログラムはここをアクセル0%にして低速で走る
@@ -57,8 +60,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 THROTTLE_GPIO = 12     # アクセル(ESC)がつながっているピン番号。変えないこと
 PWM_SHUHASU = 70       # 信号の周波数[Hz]。変えないこと
 
-N_KIJUN = 10.48        # 学習前に仮で使うNポジション[%]
-                       # 学習後は「(D点+R点)÷2」の計算値に置き換わる
+N_KIJUN = 10.48        # Nポジション[%]の基準値。設定ファイルにNが無い車はこの値を使う。
+                       # Nは学習では変えない。変えると、次にESCの電源を入れたとき
+                       # ESCのニュートラルが動き、学習した点がすべてずれるため
+NEUTRAL_ZURE_KYOYO = 0.10   # 学習結果から求めたESCのニュートラル（L点と後退L点の
+                            # 中間）とNの差[%]が、これを超えたら保存しない。
+                            # 超えるのは、ESCがN以外の信号をニュートラルとして
+                            # 覚えているとき（電源を入れ直せば直る）
 
 SUROTTORU_GYAKU = False # スロットルの向き（個別設定項目）
                         #   True  = 低い%で前進、高い%で後退（タミヤ TT-02 の実測）
@@ -311,6 +319,7 @@ class App:
         self._sousa_ban = 0           # 操作の通し番号。ボタンが押されるたびに増え、
                                       # 古い操作の続き（キック後の切替など）を無効にする
         self.gaku_phase = None        # 学習の段階: s(音) / d / kaijo / rs(音) / r
+        self.oshirase = ""            # 画面に出すお知らせ（学習の結果など）
         self._tobashi = False         # 「音が鳴らない」でL点をとばしたか
         self._phase_jikoku = 0.0      # いまの段階に入った時刻（連打の無視用）
         self.gaku_jikko = False       # 学習の実行中フラグ
@@ -325,7 +334,9 @@ class App:
         self.jido_teishi_yotei = None
         self.ima_duty = self.esc.shingou(self.n)   # 起動時は必ずN
         print(f"[ESC] 起動: N {self.n:.2f}% を出力中")
-        print("[ESC] ESCのピーピー音が止まれば、信号が届いています")
+        print("[ESC] ESCの電源は、この表示のあとに入れてください（先に入れていたら入れ直す）。")
+        print("[ESC] ESCは電源を入れた瞬間の信号をニュートラルとして覚えます。")
+        print("[ESC] 起動音のあと、ピーピー鳴り続けなければ信号が届いています")
 
         threading.Thread(target=self._mihari, daemon=True).start()
 
@@ -498,6 +509,7 @@ class App:
             self._sousa_ban += 1
             self.kick_chu = False
             self.jido_teishi_yotei = None
+            self.oshirase = ""
             self.mode = "jido_gakushu"
             self.ichi = "gakushu"
             self.gaku_phase = "s"
@@ -632,31 +644,45 @@ class App:
                 return
             print(f"[学習] R点 = {r:.2f}% を記録しました。")
 
-            # --- 計算・保存 ---
+            # --- 確認・保存（Nは変えない） ---
             with self.lock:
-                self.d_ten = d
-                self.r_ten = r
-                self.n = round((d + r) / 2, 2)
-                # L点は「NとD点の間」にあるときだけ採用する
-                # （押し間違いの値で本番の出力が狂うのを防ぐ）
-                l_ok = (s is not None and (s - self.n) * zen() > 0
-                        and (d - s) * zen() >= 0)
-                self.l_ten = s if l_ok else None
-                # 後退L点も同じ（NとR点の間にあるときだけ採用）
-                rl_ok = (rs is not None and (self.n - rs) * zen() > 0
-                         and (rs - r) * zen() >= 0)
-                self.rl_ten = rs if rl_ok else None
-                self._settei_kaku()
-            print(f"[学習] 完了! N = ({d:.2f} + {r:.2f}) ÷ 2 = {self.n:.2f}%")
-            if l_ok:
-                print(f"[学習] L点 {s:.2f}% を保存しました（本番のアクセル0%になります）")
-            elif s is not None:
-                print(f"[学習] 注意: L点 {s:.2f}% がNとD点の間にないため、保存しませんでした。")
-                print("[学習] 低速走行を使うには、学習をもう一度行ってください。")
-            if rl_ok:
-                print(f"[学習] 後退L点 {rs:.2f}% を保存しました（微速後退の確認に使います）")
-            elif rs is not None:
-                print(f"[学習] 注意: 後退L点 {rs:.2f}% がNとR点の間にないため、保存しませんでした。")
+                n = self.n
+                # ESCのニュートラル = L点と後退L点の中間。これがNと合っているか
+                chuo = None if (s is None or rs is None) else (s + rs) / 2
+                zure_ng = chuo is not None and abs(chuo - n) > NEUTRAL_ZURE_KYOYO
+                # D点はNより前進側、R点はNより後退側にあるはず
+                narabi_ng = not ((d - n) * zen() > 0 and (n - r) * zen() > 0)
+                hozon = not (zure_ng or narabi_ng)
+                if hozon:
+                    self.d_ten = d
+                    self.r_ten = r
+                    # L点は「NとD点の間」にあるときだけ採用する
+                    # （押し間違いの値で本番の出力が狂うのを防ぐ）
+                    l_ok = (s is not None and (s - n) * zen() > 0
+                            and (d - s) * zen() >= 0)
+                    self.l_ten = s if l_ok else None
+                    # 後退L点も同じ（NとR点の間にあるときだけ採用）
+                    rl_ok = (rs is not None and (n - rs) * zen() > 0
+                             and (rs - r) * zen() >= 0)
+                    self.rl_ten = rs if rl_ok else None
+                    self._settei_kaku()
+                    chui = []
+                    if s is not None and not l_ok:
+                        chui.append(f"L点 {s:.2f}% はNとD点の間にないため保存していません")
+                    if rs is not None and not rl_ok:
+                        chui.append(f"後退L点 {rs:.2f}% はNとR点の間にないため保存していません")
+                    self.oshirase = ("学習完了。保存しました（Nは " + f"{n:.2f}" + "% のまま）"
+                                     + ("。注意: " + "／".join(chui) if chui else ""))
+                elif zure_ng:
+                    self.oshirase = (
+                        f"保存しませんでした: ESCのニュートラル（L点と後退L点の中間 {chuo:.2f}%）が "
+                        f"N（{n:.2f}%）と {chuo - n:+.2f}% ずれています。"
+                        "ESCの電源を入れ直してから、もう一度学習してください")
+                else:
+                    self.oshirase = (
+                        f"保存しませんでした: D点 {d:.2f}% と R点 {r:.2f}% が N（{n:.2f}%）を"
+                        "はさんでいません。ESCの電源を入れ直してから、もう一度学習してください")
+                print("[学習] " + self.oshirase)
         finally:
             with self.lock:
                 self.mode = "normal"
@@ -680,11 +706,15 @@ class App:
             self.r_ten = None
             self.l_ten = None
             self.rl_ten = None
+            n_kawatta = abs(self.n - N_KIJUN) > 1e-9
             self.n = N_KIJUN
             self._settei_kaku()
             self.ichi = "n"
             self.ima_duty = self.esc.shingou(self.n)
-            print(f"[学習] リセット。N基準値 {N_KIJUN:.2f}% に戻しました")
+            self.oshirase = (f"学習した点を消去し、Nを基準値 {N_KIJUN:.2f}% にしました。"
+                             + ("Nが変わったので、学習の前に必ずESCの電源を入れ直してください"
+                                if n_kawatta else ""))
+            print("[学習] " + self.oshirase)
 
     def _settei_kaku(self):
         """設定ファイルへ書き込む（self.lock 取得済みで呼ばれる）"""
@@ -820,6 +850,11 @@ class App:
             ushiro_jogen = (self.rl_ten is not None and self.r_ten is not None
                             and (ushiro_teisoku - (self.rl_ten - zen() * ZENKAI_HABA
                                  * self._accel() / 100.0)) * zen() > 1e-9)
+            # ESCのニュートラル（学習済みのL点と後退L点の中間）と、Nとの差
+            esc_chuo = n_zure = None
+            if self.l_ten is not None and self.rl_ten is not None:
+                esc_chuo = round((self.l_ten + self.rl_ten) / 2, 2)
+                n_zure = round(esc_chuo - self.n, 2)
             zone = None
             if self.d_ten is not None and self.r_ten is not None:
                 zone = round(abs(self.r_ten - self.d_ten), 2)
@@ -840,6 +875,8 @@ class App:
                 "ushiro_kick": maru(ushiro_kick), "ushiro_teisoku": maru(ushiro_teisoku),
                 "mae_jogen": mae_jogen, "ushiro_jogen": ushiro_jogen,
                 "zone": zone,
+                "esc_chuo": esc_chuo, "n_zure": n_zure,
+                "oshirase": self.oshirase,
                 "ima_duty": round(self.ima_duty, 2),
                 "nokori": nokori,
                 "rpm": self.enc.rpm,
@@ -932,6 +969,7 @@ GAMEN_HTML = """<!DOCTYPE html>
           <button id="b-jido">スロットル開度学習開始</button>
         </div>
         <div class="hint">案内に従って、右の◀▶ボタンで出力を自分のペースで動かします。モーターから「ピー」と音が鳴り始めたら「音が鳴り始めた!」、タイヤが回り始めたら「回り始めた!」。これを前進と後退で1回ずつ行います（押すのは全部で4回）</div>
+        <div class="hint"><b>ESCの電源は、このプログラムを起動したあとに入れること。</b>ESCは電源を入れた瞬間の信号をニュートラルとして覚えます。先に入れていた場合や、タイヤを回している途中でESCが再起動した場合は、● N の状態で電源を入れ直してから学習します</div>
       </div>
 
       <div class="card">
@@ -969,6 +1007,7 @@ GAMEN_HTML = """<!DOCTYPE html>
           <div><div class="v" id="v-rpm">--</div><div class="k">タイヤ回転数 [rpm]</div></div>
         </div>
         <div class="hint" id="zone-hint">停止ゾーン幅（R−D）: --</div>
+        <div class="hint" id="esc-hint">ESCのニュートラル（L点と後退L点の中間）: --</div>
         <div id="adj">
           <button data-d="-0.05" disabled>◀◀ -0.05</button>
           <button data-d="-0.01" disabled>◀ -0.01</button>
@@ -997,7 +1036,7 @@ GAMEN_HTML = """<!DOCTYPE html>
   $("b-zenshin").onclick = () => sousa("/zenshin");
   $("b-kotai").onclick = () => sousa("/kotai");
   $("b-jido").onclick = () => {
-    if (confirm("スロットル開度学習を開始します。操作中にタイヤが回ります。4輪が浮いていることを確認しましたか？")) {
+    if (confirm("スロットル開度学習を開始します。操作中にタイヤが回ります。【確認1】4輪が浮いていますか？ 【確認2】ESCの電源は、このプログラムを起動した「あと」に入れましたか？（先に入れていた場合は、キャンセルして電源を入れ直してください）")) {
       sousa("/jido_gakushu");
     }
   };
@@ -1014,7 +1053,7 @@ GAMEN_HTML = """<!DOCTYPE html>
   $("b-tan-chushi").onclick = () => sousa("/tan_chushi");
   $("gaku-chushi").onclick = () => sousa("/gaku_chushi");
   $("reset").onclick = () => {
-    if (confirm("学習した点（L点・D点・後退L点・R点）をすべて消去し、Nを基準値(10.48%)に戻します。よろしいですか？")) {
+    if (confirm("学習した点（L点・D点・後退L点・R点）をすべて消去し、Nを基準値(10.48%)に戻します。Nが変わるので、このあと必ずESCの電源を入れ直してください。よろしいですか？")) {
       sousa("/gaku_reset");
     }
   };
@@ -1039,6 +1078,8 @@ GAMEN_HTML = """<!DOCTYPE html>
         ? `キック ${s.ushiro_kick.toFixed(2)}% を${kb}秒 → 低速 ${s.ushiro_teisoku.toFixed(2)}%` +
           (s.ushiro_jogen ? "（安全のため上限の「R点−0.20%」で頭打ち）" : `（後退L点からアクセル${ac}%分）`)
         : `${s.ushiro_teisoku.toFixed(2)}%（後退L点が未学習のためキック無し）`);
+      $("esc-hint").textContent = "ESCのニュートラル（L点と後退L点の中間）: " +
+        (s.esc_chuo != null ? `${s.esc_chuo.toFixed(2)} %（Nとの差 ${s.n_zure >= 0 ? "+" : ""}${s.n_zure.toFixed(2)}）` : "--");
       $("zone-hint").textContent = "停止ゾーン幅（R−D）: " +
         (s.zone != null ? s.zone.toFixed(2) + " %" : "--");
       $("v-rpm").textContent = s.rpm != null ? s.rpm.toFixed(0) : "--";
@@ -1110,7 +1151,7 @@ GAMEN_HTML = """<!DOCTYPE html>
         $("msg").textContent = (s.ichi === "zenshin" ? "微速前進" : "微速後退 3/3") +
           `: 低速 ${s.ima_duty.toFixed(2)}% で回転中... あと ${s.nokori.toFixed(0)} 秒で自動停止`;
       else
-        $("msg").textContent = "";
+        $("msg").textContent = s.oshirase || "";
     } catch (e) {}
   }
   setInterval(poll, 300);
