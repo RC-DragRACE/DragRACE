@@ -78,7 +78,7 @@ KURO_SHIKII  = 80     # ★ 「これより暗い画素＝ライン」とみな�
 
 ROI_CHIKAKU_UE    = 0.78   # 「近くの帯」の上端（0.0=画面の上端〜1.0=下端）
 ROI_CHIKAKU_SHITA = 0.95   # 「近くの帯」の下端。ハンドル修正の基準になる帯
-ROI_TOOKU_UE      = 0.55   # 「遠くの帯」の上端。ラインの傾き計測用
+ROI_TOOKU_UE      = 0.55   # 「遠くの帯」の上端。先読み（SAKIYOMI）と傾きの計測用
 ROI_TOOKU_SHITA   = 0.68   # 「遠くの帯」の下端
                            #   帯を上（数値を小さく）へ動かす → より遠くを見る。
                            #   早めに反応できるが、遠くはブレの影響が大きい。
@@ -100,6 +100,19 @@ HAJIME_GATE = 160          # 追跡開始時（スタート時）に画面中央
                            # ラインを探す。車はライン上に置かれている前提
                            #   大きくする → 小さなゴミを無視できるが、細いラインも無視
                            #   小さくする → 敏感になるがノイズを拾いやすい
+# --- ラインを「たどる」（つづく白いラインの検出） ---
+# 近くの帯で見つけたラインから上へ向かって、「つながっている所」だけを
+# 1行ずつたどり、遠くの帯の高さまで続いているかを調べる。
+# ラインとつながっていない物（外乱）は、遠くのズレとして拾わない。
+TADORI_KIZAMI = 0.008      # 何行おきに調べるか（画面の高さに対する割合。
+                           #   480画素なら約4行おき）
+TADORI_YOYU = 0.02         # 上の行の線が横にこの割合（画面幅に対して）まで
+                           #   ずれていても「つながっている」とみなす
+TADORI_NUKE = 3            # 線が途切れても、この回数までは飛び越えてたどる
+                           #   （線のかすれ対策）
+TADORI_YOKO = 0.22         # 1行の中で線がこの割合（画面幅に対して）より横に
+                           #   長ければ、そこでたどるのをやめる（線が横向きに
+                           #   なった＝急カーブ、または線ではない大きな物）
 ROSUTO_KAKUTEI = 10        # 「ライン無し」がこのフレーム数続いたら停止（約0.33秒@30fps）
                            #   大きくする → 一瞬の見失いで止まらないが、
                            #                コースアウト時の停止が遅れて危険
@@ -232,6 +245,16 @@ STEER_D_GAIN = 0.035  # ★ Dゲイン（微分）: 「ズレの勢い」に対�
                       #   目安: 蛇行が出たら 0.01 刻みで上げ下げして試す
                       #         （0.01〜0.05 の範囲で調整）
                       #   初期値0.035は基準車の実走で蛇行が収まった値
+SAKIYOMI = 0.0        # ★ 先読みの割合（0〜1）。ハンドルを決めるとき、
+                      #   遠くの帯のズレをどれだけ重視するか（個別セッティング）
+                      #     0   → 近くの帯だけで決める（これまでどおり）
+                      #     0.5 → 近くと遠くを半分ずつ
+                      #     1   → 遠くの帯だけで決める
+                      #   大きくする → カーブに早く切り始め、コーナー出口で
+                      #                行き過ぎにくい。ただし遠くは見え方が粗いので
+                      #                上げすぎるとふらつく
+                      #   遠くのズレは近くより大きく出る。先読みを増やしたら
+                      #   STEER_P_GAIN は下げること（目安: 0.5 にしたら P は 3分の2）
 KIREKAKU_HABA = 1.00  # ハンドルの最大値[%]（機械限界の保護）。servo_testと同じ値
 HANDORU_GYAKU = False # ハンドルの向き（個別設定項目）。ラインから「逃げる」方向に
                       # 切ってしまう車は True。servo_test の「左右の向きを反転」
@@ -331,6 +354,63 @@ settei_yomikomi()
 #   （camera_test.py と同じ仕組み。詳しい解説は設計書へ）
 # ==============================================================================
 
+def sen_wo_tadoru(sen_dake, hidari, migi, y_kaishi, y_owari):
+    """ラインを下から上へ、つながっている所だけ1行ずつたどる。
+       sen_dake : ラインの色の所だけを白(255)にした画像
+       hidari, migi : 出発点（近くの帯で見つけたライン）の左端・右端[px]
+       y_kaishi : たどり始める行（近くの帯の中央）
+       y_owari  : ここまでたどる（遠くの帯の上端）
+       返り値   : たどれた点のリスト [(横位置, 行), ...]（下から上の順）
+
+       「つながっている」の決め方:
+         1行の中の白い区間のうち、ひとつ下の行で選んだ区間と横の位置が
+         重なっているものだけを、ラインの続きとする。重なる区間が無い行が
+         TADORI_NUKE 回つづいたら、そこでラインは終わりとみなす。"""
+    takasa, haba = sen_dake.shape[:2]
+    kizami = max(2, int(round(takasa * TADORI_KIZAMI)))
+    yoyu = haba * TADORI_YOYU
+    ten = []
+    nuke = 0                    # 続けて見つからなかった回数
+    ugoki = 0.0                 # 1回ぶん上がると横へどれだけ動いたか（次の位置の予想用）
+    y = y_kaishi
+    while y >= y_owari and y >= 1:
+        # 2行ぶんを重ねて1行として見る（細い線の途切れに強くする）
+        gyo = sen_dake[y - 1:y + 1].max(axis=0) > 0
+        # 白い区間の左端と右端をすべて取り出す
+        hashi = np.flatnonzero(np.diff(np.concatenate(([0], gyo.astype(np.int8), [0]))))
+        hirosa = yoyu * (1 + nuke)              # 途切れを飛び越えるほど、探す範囲を広げる
+        yosou = (hidari + migi) / 2 + ugoki * (1 + nuke)
+        erabi = None
+        for a, b in zip(hashi[0::2], hashi[1::2] - 1):      # a=左端 b=右端
+            if b - a + 1 < 2:
+                continue                                    # 1画素だけの点は無視
+            if b < hidari - hirosa or a > migi + hirosa:
+                continue                                    # 下の行とつながっていない
+            c = (a + b) / 2
+            if erabi is None or abs(c - yosou) < abs(erabi[2] - yosou):
+                erabi = (a, b, c)                           # 予想に一番近い区間を選ぶ
+        if erabi is None:
+            nuke += 1
+            if nuke > TADORI_NUKE:
+                break                                       # ラインはここで終わり
+        else:
+            a, b, c = erabi
+            if b - a + 1 > haba * TADORI_YOKO:
+                # 横に長い区間 = 「横向きになったライン」か「線ではない大きな物」。
+                # 少し上がまた白ければ大きな物なので使わない。
+                # 上が床なら横向きのライン（急カーブ）なので、最後の点として使う。
+                y_ue = y - max(kizami * 6, int(takasa * 0.06))
+                if y_ue >= 0 and np.count_nonzero(sen_dake[y_ue, a:b + 1]) < (b - a + 1) * 0.5:
+                    ten.append((float(c), y))
+                break
+            if ten:
+                ugoki = (c - ten[-1][0]) / (1 + nuke)
+            ten.append((float(c), y))
+            hidari, migi, nuke = a, b, 0
+        y -= kizami
+    return ten
+
+
 def me_de_miru(gazou, ato_zure=None):
     """1枚の画像を調べて、見つけた結果を辞書で返す。
        ato_zure: 前フレームまで追跡していたラインの横位置[px]（None=追跡開始）"""
@@ -344,12 +424,12 @@ def me_de_miru(gazou, ato_zure=None):
         _, sen_dake = cv2.threshold(shirokuro, SHIRO_SHIKII, 255, cv2.THRESH_BINARY)
 
     def obi_wo_shiraberu(ue, shita, gate_chuo, gate_haba):
-        """帯の中の黒を塊ごとに分け、ゲート内で最も近い塊をラインとして返す。
-           返り値: (ズレ, 広がり, ゲート外の塊の位置リスト)"""
+        """帯の中のラインの色を塊ごとに分け、ゲート内で最も近い塊をラインとして返す。
+           返り値: (ズレ, 広がり, ゲート外の塊の位置リスト, ラインの左端, 右端)"""
         y0, y1 = int(takasa * ue), int(takasa * shita)
         obi = sen_dake[y0:y1, :]
         kosu, labels, stats, centers = cv2.connectedComponentsWithStats(obi)
-        line_zure, line_hirogari = None, 0.0
+        line_zure, line_hirogari, hidari, migi = None, 0.0, None, None
         chikai = None
         marks = []
         for i in range(1, kosu):                     # 0は背景
@@ -358,12 +438,14 @@ def me_de_miru(gazou, ato_zure=None):
             zure = centers[i][0] - chuo
             if abs(zure - gate_chuo) <= gate_haba:   # ゲート内 → ライン候補
                 if chikai is None or abs(zure - gate_chuo) < abs(chikai[0] - gate_chuo):
-                    chikai = (zure, stats[i, cv2.CC_STAT_WIDTH] / haba)
+                    chikai = (zure, stats[i, cv2.CC_STAT_WIDTH] / haba,
+                              int(stats[i, cv2.CC_STAT_LEFT]),
+                              int(stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH] - 1))
             else:                                    # ゲート外 → マーク
                 marks.append(round(float(zure), 1))
         if chikai is not None:
-            line_zure, line_hirogari = chikai
-        return line_zure, line_hirogari, marks
+            line_zure, line_hirogari, hidari, migi = chikai
+        return line_zure, line_hirogari, marks, hidari, migi
 
     # 追跡の中心: 前回位置（無ければ画面中央から探し始める）
     if ato_zure is None:
@@ -371,16 +453,36 @@ def me_de_miru(gazou, ato_zure=None):
     else:
         gate_chuo, gate_haba = ato_zure, TSUIZUI_GATE
 
-    zure_chikaku, hirogari_chikaku, marks = obi_wo_shiraberu(
+    zure_chikaku, hirogari_chikaku, marks, line_hidari, line_migi = obi_wo_shiraberu(
         ROI_CHIKAKU_UE, ROI_CHIKAKU_SHITA, gate_chuo, gate_haba)
-    zure_tooku, _, _ = obi_wo_shiraberu(
-        ROI_TOOKU_UE, ROI_TOOKU_SHITA, gate_chuo, gate_haba * 1.5)
+
+    # --- 遠くのズレ: 近くの帯のラインから上へ、つながっている所をたどって決める ---
+    tadori = []
+    zure_tooku = y_tooku = None
+    if zure_chikaku is not None:
+        y_kaishi = int(takasa * (ROI_CHIKAKU_UE + ROI_CHIKAKU_SHITA) / 2)
+        y_obi_ue, y_obi_shita = int(takasa * ROI_TOOKU_UE), int(takasa * ROI_TOOKU_SHITA)
+        tadori = sen_wo_tadoru(sen_dake, line_hidari, line_migi, y_kaishi, y_obi_ue)
+        todoita = [t for t in tadori if t[1] <= y_obi_shita]    # 遠くの帯まで届いた点
+        if todoita:
+            zure_tooku = sum(t[0] for t in todoita) / len(todoita) - chuo
+            y_tooku = sum(t[1] for t in todoita) / len(todoita)
+        elif len(tadori) >= 2:
+            # 遠くの帯まで届かなかった → たどれた一番上の点を「遠く」として使う
+            zure_tooku = tadori[-1][0] - chuo
+            y_tooku = float(tadori[-1][1])
+
+    # --- 狙い: ハンドルを決めるときに使う位置（近くと遠くを SAKIYOMI の割合で混ぜる） ---
+    nerai = zure_chikaku
+    if zure_chikaku is not None and zure_tooku is not None and SAKIYOMI > 0:
+        wariai = min(1.0, float(SAKIYOMI))
+        nerai = (1 - wariai) * zure_chikaku + wariai * zure_tooku
 
     katamuki = None
     if zure_chikaku is not None and zure_tooku is not None:
         y_c = takasa * (ROI_CHIKAKU_UE + ROI_CHIKAKU_SHITA) / 2
-        y_t = takasa * (ROI_TOOKU_UE + ROI_TOOKU_SHITA) / 2
-        katamuki = math.degrees(math.atan2(zure_tooku - zure_chikaku, y_c - y_t))
+        if y_c - y_tooku > 1:
+            katamuki = math.degrees(math.atan2(zure_tooku - zure_chikaku, y_c - y_tooku))
 
     # 緑シグナル
     y0, y1 = int(takasa * SIG_UE), int(takasa * SIG_SHITA)
@@ -393,6 +495,9 @@ def me_de_miru(gazou, ato_zure=None):
         "zure": None if zure_chikaku is None else round(float(zure_chikaku), 1),
         "zure_tooku": None if zure_tooku is None else round(float(zure_tooku), 1),
         "katamuki": None if katamuki is None else round(katamuki, 1),
+        "tooku_y": None if y_tooku is None else round(float(y_tooku), 1),
+        "tadori": [(int(round(tx)), int(ty)) for tx, ty in tadori],
+        "nerai": None if nerai is None else round(float(nerai), 1),
         "line_mieru": zure_chikaku is not None,
         "hirogari": round(hirogari_chikaku, 2),
         "marks": marks,
@@ -436,7 +541,9 @@ def nou_de_handan(app, kekka, ima):
         # --- アクセル: 発進プロファイル（発進%からランプで踏み増す） ---
         accel = min(ACCEL_SAIDAI, ACCEL_HASSHIN + ACCEL_RAMPU * keika)
 
-        # --- ハンドル: P制御(いまのズレ) + D制御(ズレの勢い=この先の予告) ---
+        # --- ハンドル: P制御(狙いのズレ) + D制御(ズレの勢い=この先の予告) ---
+        # 狙い = 近くの帯のズレと遠くの帯のズレを SAKIYOMI の割合で混ぜたもの。
+        # SAKIYOMI=0 なら近くの帯のズレそのもの（これまでどおり）。
         # ラインの色が横に広い（＝横線進入中など）ときは、
         # 計算がくるうのでハンドルを直前の値のまま保持する
         if kekka["zure"] is not None and kekka["hirogari"] < STEER_HOJI_HIROGARI:
@@ -449,7 +556,7 @@ def nou_de_handan(app, kekka, ima):
             else:
                 sabun = kekka["zure"] - app.zure_zenkai
             app.zure_zenkai = kekka["zure"]
-            sa = -(STEER_P_GAIN * kekka["zure"] + STEER_D_GAIN * sabun) * muki
+            sa = -(STEER_P_GAIN * kekka["nerai"] + STEER_D_GAIN * sabun) * muki
             app.steer_sa = max(-KIREKAKU_HABA, min(KIREKAKU_HABA, sa))
         else:
             # ライン無し・保持中は差分の記憶を捨てる
@@ -785,7 +892,13 @@ def gamen_ni_kaku(gazou, kekka, state, ato=None):
 
     gate_chikaku = TSUIZUI_GATE if ato is not None else HAJIME_GATE
     gate_waku(ROI_CHIKAKU_UE, ROI_CHIKAKU_SHITA, gate_chikaku)
-    gate_waku(ROI_TOOKU_UE, ROI_TOOKU_SHITA, int(gate_chikaku * 1.5))
+    # （遠くの帯には枠が無い。遠くの点は、近くの帯のラインからたどって決めるため）
+
+    # たどったライン（つづく線）を小さな黄色の点で描く
+    for tx, ty in kekka.get("tadori", []):
+        cv2.circle(img, (tx, ty), 2, (0, 255, 255), -1)
+    if kekka.get("tooku_y") is not None:
+        y_tooku = int(kekka["tooku_y"])     # 遠くの点は、実際にたどり着いた高さに描く
 
     y0, y1 = int(takasa * SIG_UE), int(takasa * SIG_SHITA)
     x0, x1 = int(haba * SIG_HIDARI), int(haba * SIG_MIGI)
@@ -807,6 +920,11 @@ def gamen_ni_kaku(gazou, kekka, state, ato=None):
     if kekka["zure"] is not None and kekka["zure_tooku"] is not None:
         cv2.line(img, (int(chuo + kekka["zure"]), y_chikaku),
                  (int(chuo + kekka["zure_tooku"]), y_tooku), (0, 128, 255), 2)
+
+    # 狙い（先読みを混ぜた、ハンドルを決める位置）を白い縦線で描く
+    if SAKIYOMI > 0 and kekka.get("nerai") is not None:
+        nx = int(chuo + kekka["nerai"])
+        cv2.line(img, (nx, y_chikaku - 16), (nx, y_chikaku + 16), (255, 255, 255), 2)
 
     cv2.putText(img, state, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
                 (255, 255, 255), 2, cv2.LINE_AA)
@@ -909,7 +1027,8 @@ class RaceApp:
         self._csv_file = open(self._kiroku_base + ".csv", "w", newline="")
         self._csv = csv.writer(self._csv_file)
         self._csv.writerow(["時間[秒]", "横ズレ[px]", "遠くのズレ[px]", "傾き[度]",
-                            "ライン", "マーク数", "ハンドル[%]", "アクセル[%]"])
+                            "ライン", "マーク数", "ハンドル[%]", "アクセル[%]",
+                            "狙い[px]"])
         # --- 設定スナップショット(この走りがどんなセッティングだったかの記録) ---
         snap = {
             "nichiji": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -921,6 +1040,9 @@ class RaceApp:
             "LINE_IRO": LINE_IRO,
             "KURO_SHIKII": KURO_SHIKII, "SHIRO_SHIKII": SHIRO_SHIKII,
             "TSUIZUI_GATE": TSUIZUI_GATE,
+            "SAKIYOMI": SAKIYOMI, "STEER_HOJI_HIROGARI": STEER_HOJI_HIROGARI,
+            "ROI_CHIKAKU_UE": ROI_CHIKAKU_UE, "ROI_CHIKAKU_SHITA": ROI_CHIKAKU_SHITA,
+            "ROI_TOOKU_UE": ROI_TOOKU_UE, "ROI_TOOKU_SHITA": ROI_TOOKU_SHITA,
             "STEER_CHURITSU": self.teashi.steer_churitsu,
             "ZENSHIN_KYOKAI": self.teashi.d_ten,
             "KOTAI_KYOKAI": self.teashi.r_ten,
@@ -936,7 +1058,8 @@ class RaceApp:
             self._csv.writerow([f"{keika:.3f}", kekka["zure"], kekka["zure_tooku"],
                                 kekka["katamuki"], int(kekka["line_mieru"]),
                                 len(kekka.get("marks", [])),
-                                f"{self.steer_sa:+.2f}", f"{self.accel:.0f}"])
+                                f"{self.steer_sa:+.2f}", f"{self.accel:.0f}",
+                                kekka.get("nerai")])
 
     def kiroku_shuryo(self):
         if self._csv_file:
