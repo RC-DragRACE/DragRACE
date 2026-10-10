@@ -159,14 +159,26 @@ JUJI_X, JUJI_Y = 0.50, 0.55   # 画面上の位置（0.5＝中央）
 #         0      ┼──┬─────────────→ 時間
 #                 発進
 #
+#   【アクセル%の目盛り】
+#     0%   = L点（モーターから音が鳴り始める点）。throttle_test で学習する。
+#            動き出した車が回り続けられる、いちばん弱い信号
+#     約8% = D点（止まった状態からタイヤが回り始める点）。車ごとに少し違う
+#     100% = L点から ZENKAI_HABA だけ前進側（モーター回転が頭打ちになる点）
+#     L点を学習していない車は、D点が0%になる（低速では走れない）
+#
+#   【発進キック】モーターは動き出しに一番力が要る。発進から KICK_BYO 秒間は
+#     最低でもD点の信号を出して動き出させ、そのあと設定したアクセルへ下げる。
+#
 #   【初期値について】ここの初期値は「はじめて走らせても安全な、慎重な走り」
 #   になるように低めにしてある。kuruma_settei.json に書かなければこの値で走る。
 #   まずこの値で完走できることを確認し、そこから少しずつ上げていくこと。
 # ------------------------------------------------------------------------------
-ACCEL_SAIDAI  = 10    # ★ 走行中の最大アクセル[%]（個別セッティング）
+ACCEL_SAIDAI  = 5     # ★ 走行中の最大アクセル[%]（個別セッティング）
                       #   上げる → 最高速が上がる。上限をどこに置くかも戦略
                       #   上げたらハンドルのゲインとブレーキも合わせ直すこと
-                      #   初期値10は慎重走行用。完走を確認してから10ずつ上げる
+                      #   初期値5は慎重走行用（D点より弱い、ゆっくりした走り）。
+                      #   途中で止まってしまう車は1ずつ上げる。
+                      #   完走を確認してから少しずつ上げていく
                       #   発進アクセル(ACCEL_HASSHIN)がこれより大きくても、
                       #   この値で頭打ちになる（最大を超えることはない）
 ACCEL_HASSHIN = 20    # ★ 発進の瞬間に踏むアクセル[%]
@@ -178,11 +190,22 @@ ACCEL_RAMPU   = 20    # ★ アクセルの踏み増し速度[%/秒]
                       #   大きくする → 早く全開に達する（空転・蛇行のリスク増）
                       #   小さくする → じわっと加速（安定するが遅い）
                       #   例: 発進30% + 毎秒50% → 約1.4秒で100%に到達
-                      #   （初期値では最大10%なので、発進した瞬間から10%で一定）
+                      #   （初期値では最大5%なので、発進した瞬間から5%で一定）
 
-ZENKAI_HABA = 2.75    # アクセル100%のとき、D点から前進側へ出す信号量[%]。
+ZENKAI_HABA = 2.75    # アクセル100%のとき、0%の点から前進側へ出す信号量[%]。
                       # 基準車のエンコーダ実測（モーター回転の飽和点）で決めた値。
                       # これ以上増やしても速くならないことを確認済み。変えないこと
+
+ZENSHIN_SAITEI = None # L点: アクセル0%のときの信号[%]（学習値・個別）
+                      #   throttle_test の学習で kuruma_settei.json に保存される。
+                      #   手で書き換えないこと。
+                      #   無い(None) → D点（回り始める点）が0%になる
+                      #   NとD点の間の値だけ有効。それ以外は無視してD点を使う
+KICK_BYO = 0.3        # ★ 発進キックの時間[秒]。L点を学習した車だけ働く
+                      #   発進からこの秒数は、最低でもD点の信号を出す
+                      #   （モーターは動き出しに一番力が要るため）
+                      #   長くする → 確実に動き出すが、出だしが速くなる
+                      #   短くする → 出だしが穏やかだが、動き出せないことがある
 
 # ------------------------------------------------------------------------------
 # ステアリング制御
@@ -434,7 +457,7 @@ def nou_de_handan(app, kekka, ima):
             app.zure_zenkai = None
         # (ハンドル自体は app.steer_sa を保持 = 前回の値のまま)
 
-        app.teashi.hashiru(app.steer_sa, accel)
+        app.teashi.hashiru(app.steer_sa, accel, keika < KICK_BYO)
         app.accel = accel
         app.kiroku_tsuika(keika, kekka)
 
@@ -588,10 +611,29 @@ class TeAshi:
         if self.chosei_zumi:
             print(f"[手足] 個体値: ステア中立={self.steer_churitsu:.2f}% "
                   f"D点={self.d_ten:.2f}% R点={self.r_ten:.2f}% N={self.n:.2f}%")
+            if ZENSHIN_SAITEI is None:
+                print("[手足] L点が未学習です。アクセル0% = D点で走ります（低速では走れません）。")
         else:
             print(f"[手足] 警告: {SETTEI_FILE} が無いか不完全です。")
             print("[手足] servo_test.py と throttle_test.py の調整・学習を先に行ってください。")
             print("[手足] 安全のため、走行開始(ARM)はできません。")
+
+        # --- アクセル0%の点: L点（ZENSHIN_SAITEI）。未学習ならD点 ---
+        self.zero_ten = self.d_ten
+        if self.chosei_zumi and ZENSHIN_SAITEI is not None:
+            muki = -1 if SUROTTORU_GYAKU else 1
+            ok = (isinstance(ZENSHIN_SAITEI, (int, float))
+                  and not isinstance(ZENSHIN_SAITEI, bool)
+                  and 0 < (ZENSHIN_SAITEI - self.n) * muki
+                        <= (self.d_ten - self.n) * muki)
+            if ok:
+                self.zero_ten = float(ZENSHIN_SAITEI)
+                print(f"[手足] 低速走行: アクセル0% = L点 {self.zero_ten:.2f}% "
+                      f"(D点 {self.d_ten:.2f}%) / 発進キック {KICK_BYO}秒")
+            else:
+                print(f"[手足] 警告: L点(ZENSHIN_SAITEI)={ZENSHIN_SAITEI} は "
+                      f"N({self.n:.2f}%)とD点({self.d_ten:.2f}%)の間にありません。")
+                print("[手足] 無視してD点を0%にします。throttle_test で学習し直してください。")
 
         # --- pigpio ---
         try:
@@ -621,12 +663,14 @@ class TeAshi:
         return duty
 
     # --- 走行出力: ハンドル差分[%]とアクセル[0-100%]を受け取る ---
-    def hashiru(self, steer_sa, accel):
+    def hashiru(self, steer_sa, accel, kick=False):
         if not self.chosei_zumi or self._brake_chu:
             return
         self.ima_steer = self._dasu(STEER_GPIO, self.steer_churitsu + steer_sa)
         muki = -1 if SUROTTORU_GYAKU else 1
-        duty = self.d_ten + muki * ZENKAI_HABA * (accel / 100.0)
+        duty = self.zero_ten + muki * ZENKAI_HABA * (accel / 100.0)
+        if kick:        # 発進キック中: D点より弱い信号にはしない
+            duty = max(duty, self.d_ten) if muki > 0 else min(duty, self.d_ten)
         self.ima_throttle = self._dasu(THROTTLE_GPIO, duty)
 
     # --- 停止: ブレーキ→N（別スレッドで自動実行） ---
@@ -878,6 +922,7 @@ class RaceApp:
             "ZENSHIN_KYOKAI": self.teashi.d_ten,
             "KOTAI_KYOKAI": self.teashi.r_ten,
             "THROTTLE_N": self.teashi.n,
+            "ZENSHIN_SAITEI": ZENSHIN_SAITEI, "KICK_BYO": KICK_BYO,
         }
         with open(self._kiroku_base + "_settei.json", "w") as f:
             json.dump(snap, f, indent=2, ensure_ascii=False)
