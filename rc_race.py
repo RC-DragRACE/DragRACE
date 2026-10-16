@@ -137,10 +137,12 @@ GOAL_KAKUTEI = 2      # 左右同時MARKが連続このフレーム数でゴー�
                       #   大きくする → 誤判定は減るが、高速通過で見逃すリスク
 
 # ------------------------------------------------------------------------------
-# 計測サーバへの通過通知（集計の自動化用。無くても走行に影響しない）
+# 計測サーバとの連携（レーン登録・モニタへの映像・タイム通知。無くても走行に影響しない）
+#   操作画面で「レーン1」「レーン2」を押した車だけが計測サーバに登録される。
+#   サーバは届いた通信の送り元IPで車を見つけるので、DHCPでIPが変わっても大丈夫。
 # ------------------------------------------------------------------------------
-KEISOKU_URL = ""      # ★ 計測サーバのURL（例: "http://192.168.18.250:9000/goal"）
-                      #   空欄なら通知しない。走行ロジックには一切影響しない
+KEISOKU_SERVER = ""   # ★ 計測サーバのアドレス（例: "rc-timer.local:9000" / "192.168.18.250:9000"）
+                      #   空欄なら、同じWi-Fiで合図を出している計測サーバを自動で探す
 KURUMA_NAMAE = ""     # ★ この車の名前（例: "rc-car-07"）。空欄ならホスト名を使う
 
 # ------------------------------------------------------------------------------
@@ -935,6 +937,127 @@ def gamen_ni_kaku(gazou, kekka, state, ato=None):
 # ブロック6: プログラム全体のまとめ役 と Webサーバ
 # ==============================================================================
 
+class KeisokuRenkei:
+    """計測サーバとの連携係。走行ロジックとは別スレッドで動き、失敗しても走行に影響しない。
+
+    ・lane が 1 か 2 の間、2 秒ごとに「この車はレーン N にいます」とサーバへ登録する
+    ・lane が 0（出ない）なら何も送らない → モニタ表示もタイム計測もされない
+    ・KEISOKU_SERVER が空欄なら、サーバが 1 秒ごとに出す合図（UDP）を聞いて自動で見つける
+    """
+    AIZU_PORT = 9999          # 計測サーバの合図を聞くポート
+
+    def __init__(self):
+        import socket
+        self.lock = threading.Lock()
+        self.lane = 0                         # 0 = 出ない / 1 / 2
+        self.namae = KURUMA_NAMAE or socket.gethostname()
+        self.mitsuketa = ""                   # 合図で見つけたサーバ
+        self.setsuzoku = False                # 最後の登録が成功したか
+        self.message = ""                     # 画面に出す説明
+        self._oshita = threading.Event()      # ボタンが押されたらすぐ送る
+        self._kyousei = False                 # ボタン直後の登録は「上書き」で送る
+        threading.Thread(target=self._touroku_loop, daemon=True).start()
+        if not KEISOKU_SERVER:
+            threading.Thread(target=self._aizu_loop, daemon=True).start()
+
+    def server(self):
+        s = (KEISOKU_SERVER or self.mitsuketa).strip()
+        s = s.replace("http://", "").rstrip("/")
+        if s and ":" not in s:
+            s += ":9000"
+        return s
+
+    def lane_erabu(self, lane):
+        self.message = ""
+        with self.lock:
+            mae = self.lane
+            self.lane = lane if lane in (1, 2) else 0
+            self._kyousei = self.lane != 0
+            self._yameta = (mae != 0 and self.lane == 0)
+        self._oshita.set()
+        print(f"[計測] レーン選択: {self.lane or '出ない'}")
+
+    def _okuru(self, path, data):
+        import urllib.request
+        req = urllib.request.Request(
+            f"http://{self.server()}{path}", data=json.dumps(data).encode("utf-8"),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=1.5) as r:
+            return json.loads(r.read().decode("utf-8") or "{}")
+
+    def _touroku_loop(self):
+        while True:
+            self._oshita.wait(2.0)
+            self._oshita.clear()
+            with self.lock:
+                lane, kyousei = self.lane, self._kyousei
+                yameta, self._yameta = getattr(self, "_yameta", False), False
+                self._kyousei = False
+            if not self.server():
+                self.setsuzoku = False
+                self.message = "計測サーバを探しています…"
+                continue
+            try:
+                if lane == 0:
+                    if yameta:          # 「出ない」を押したときだけ、登録の取り消しを送る
+                        self._okuru("/entry", {"lane": 0, "kuruma": self.namae, "port": HTTP_PORT})
+                        self.message = ""
+                    self.setsuzoku = True
+                    continue
+                kotae = self._okuru("/entry", {"lane": lane, "kuruma": self.namae,
+                                               "port": HTTP_PORT, "kyousei": kyousei})
+                self.setsuzoku = True
+                if kotae.get("ok"):
+                    self.message = f"レーン{lane}で登録中"
+                else:                   # 他の車がこのレーンを後から選んだ
+                    with self.lock:
+                        self.lane = 0
+                    self.message = f"レーン{lane}は {kotae.get('dare', '他の車')} が選びました"
+                    print(f"[計測] {self.message}")
+            except Exception:
+                self.setsuzoku = False
+                self.message = "計測サーバにつながりません"
+
+    def _aizu_loop(self):
+        import socket
+        try:
+            so = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            so.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            so.bind(("", self.AIZU_PORT))
+        except OSError as e:
+            print(f"[計測] 合図を聞けません ({e})。KEISOKU_SERVER を設定してください")
+            return
+        while True:
+            try:
+                data, (ip, _) = so.recvfrom(256)
+                kotoba = data.decode("utf-8", "ignore").split()
+                if len(kotoba) >= 2 and kotoba[0] == "RCTIMER":
+                    atarashii = f"{ip}:{int(kotoba[1])}"
+                    if atarashii != self.mitsuketa:
+                        self.mitsuketa = atarashii
+                        print(f"[計測] 計測サーバを見つけました: {atarashii}")
+            except Exception:
+                time.sleep(1)
+
+    def goal_tsuchi(self, goal_time, riyu):
+        """走行が終わったら、レーンに出ている車だけ結果を知らせる（別スレッド）"""
+        if self.lane == 0 or not self.server():
+            return
+        def okuru():
+            try:
+                self._okuru("/goal", {"kuruma": self.namae, "lane": self.lane,
+                                      "time": None if goal_time is None else round(goal_time, 3),
+                                      "riyu": riyu})
+                print(f"[計測] 通過を通知しました: {self.namae} {goal_time}秒")
+            except Exception as e:
+                print(f"[計測] 通知できませんでした ({e}) — 走行には影響ありません")
+        threading.Thread(target=okuru, daemon=True).start()
+
+    def joutai(self):
+        return {"lane": self.lane, "server": self.server(),
+                "setsuzoku": self.setsuzoku, "message": self.message}
+
+
 class RaceApp:
     def __init__(self):
         self.kamera = Kamera()
@@ -965,6 +1088,7 @@ class RaceApp:
         self._csv_file = None
         self._kiroku_base = None      # 今回の走行の記録ファイル名（拡張子なし）
         self._douga = None            # 動画の書き込み係（映像ループが管理する）
+        self.renkei = KeisokuRenkei() # 計測サーバとの連携（レーン選択）
 
     # ---- ボタン ----
     def botan_arm(self):
@@ -994,29 +1118,9 @@ class RaceApp:
             if mae != "IDLE":
                 print(f"[ボタン] STOP: {mae} → IDLE")
 
-    # ---- 計測サーバへの通過通知（別スレッドで送る。失敗しても走行に影響なし） ----
+    # ---- 計測サーバへの通過通知（レーンに出ている車だけ。失敗しても走行に影響なし） ----
     def keisoku_tsuchi(self):
-        if not KEISOKU_URL:
-            return
-        threading.Thread(target=self._tsuchi_okuru, daemon=True).start()
-
-    def _tsuchi_okuru(self):
-        try:
-            import socket
-            import urllib.request
-            namae = KURUMA_NAMAE or socket.gethostname()
-            data = json.dumps({
-                "kuruma": namae,
-                "time": None if self.goal_time is None else round(self.goal_time, 3),
-                "riyu": self.owari_riyu,
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                KEISOKU_URL, data=data,
-                headers={"Content-Type": "application/json"})
-            urllib.request.urlopen(req, timeout=2.0)
-            print(f"[計測] 通過を通知しました: {namae} {self.goal_time}秒")
-        except Exception as e:
-            print(f"[計測] 通知できませんでした ({e}) — 走行には影響ありません")
+        self.renkei.goal_tsuchi(self.goal_time, self.owari_riyu)
 
     # ---- 走行データの記録 ----
     def kiroku_kaishi(self):
@@ -1151,6 +1255,7 @@ class RaceApp:
                 "goal_time": None if self.goal_time is None else round(self.goal_time, 2),
                 "owari_riyu": self.owari_riyu,
                 "chosei_zumi": self.teashi.chosei_zumi,
+                "keisoku": self.renkei.joutai(),
             })
 
 
@@ -1193,6 +1298,15 @@ GAMEN_HTML = """<!DOCTYPE html>
   #btn-stop { background:#c94f4f; }
   button:active { filter:brightness(.85); }
   button:disabled { opacity:.4; cursor:default; }
+  #lanebox { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:10px; display:flex; flex-direction:column; gap:8px; }
+  #lanebox .k { font-size:12px; color:var(--dim); }
+  #lanebtns { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+  #lanebtns button { padding:12px 4px; font-size:18px; background:#39414b; border:2px solid transparent; }
+  #lanebtns button.sel1 { background:#2f6fb0; border-color:#7cc1ff; }
+  #lanebtns button.sel2 { background:#b0612f; border-color:#ffb27c; }
+  #lanebtns button.sel0 { background:#4a525c; border-color:#aab3bd; }
+  #lanemsg { font-size:13px; color:var(--dim); min-height:18px; }
   #result { text-align:center; font-size:16px; color:var(--dim); min-height:22px; }
   #result.warn { color:#e0b45c; font-weight:700; }
   @media (max-width:820px) {
@@ -1217,6 +1331,15 @@ GAMEN_HTML = """<!DOCTYPE html>
       <div class="metric"><div class="v" id="m-accel">--</div><div class="k">アクセル [%]</div></div>
       <div class="metric"><div class="v" id="m-steer">--</div><div class="k">ハンドル [%]</div></div>
     </div>
+    <div id="lanebox">
+      <div class="k">レース出場（モニタ表示・タイム計測）</div>
+      <div id="lanebtns">
+        <button id="lane-1" data-lane="1">レーン1</button>
+        <button id="lane-2" data-lane="2">レーン2</button>
+        <button id="lane-0" data-lane="0">出ない</button>
+      </div>
+      <div id="lanemsg"></div>
+    </div>
     <div id="result"></div>
     <div id="buttons">
       <button id="btn-arm">ARM — スタート待機</button>
@@ -1227,6 +1350,9 @@ GAMEN_HTML = """<!DOCTYPE html>
   const $ = id => document.getElementById(id);
   $("btn-arm").onclick = () => fetch("/arm", {method:"POST"});
   $("btn-stop").onclick = () => fetch("/stop", {method:"POST"});
+  document.querySelectorAll("#lanebtns button").forEach(b => b.onclick = () =>
+    fetch("/lane", {method:"POST", headers:{"Content-Type":"application/json"},
+                    body: JSON.stringify({lane: Number(b.dataset.lane)})}));
   const riyu = { goal:"ゴール!", line_lost:"ラインロスト", timeout:"タイムアウト",
                  tsushin_lost:"通信断のため停止" };
   async function poll() {
@@ -1248,6 +1374,16 @@ GAMEN_HTML = """<!DOCTYPE html>
       $("m-fps").textContent = s.fps ?? "--";
       $("m-accel").textContent = s.accel ?? "--";
       $("m-steer").textContent = (s.steer >= 0 ? "+" : "") + s.steer.toFixed(2);
+      const k = s.keisoku || {lane:0};
+      [0, 1, 2].forEach(n => {
+        const b = $("lane-" + n);
+        b.className = k.lane === n ? "sel" + n : "";
+        b.disabled = s.state === "RUNNING";
+      });
+      $("lanemsg").textContent = k.lane === 0
+        ? (k.message || "出ない: モニタに映らず、タイムも計測されません")
+        : (k.message || "") + (k.setsuzoku ? `（${k.server}）` : "");
+      $("lanemsg").className = k.lane !== 0 && !k.setsuzoku ? "ng" : "";
       $("btn-arm").disabled = !s.chosei_zumi && s.state === "IDLE" ? true : (s.state !== "IDLE");
       const r = $("result");
       if (!s.chosei_zumi) {
@@ -1319,6 +1455,16 @@ def handler_wo_tsukuru(app):
                 app.botan_arm()
             elif self.path == "/stop":
                 app.botan_stop()
+            elif self.path == "/lane":
+                try:
+                    n = int(self.headers.get("Content-Length", 0))
+                    lane = int(json.loads(self.rfile.read(n) or b"{}").get("lane", 0))
+                except (ValueError, TypeError):
+                    lane = 0
+                with app.lock:
+                    hashitteru = app.state == "RUNNING"
+                if not hashitteru:              # 走行中はレーンを変えない
+                    app.renkei.lane_erabu(lane)
             else:
                 self.send_response(404)
                 self.end_headers()
