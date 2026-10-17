@@ -1266,33 +1266,39 @@ GAMEN_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RC RACE</title>
 <style>
+  /* 左: 走行データ（状態・映像・数値）  右: 操作（レース出場・ARM・STOP）
+     画面の高さに収まるように並べ、スクロールしなくても全部見える */
   :root {
     --bg:#171a1e; --panel:#21262c; --line:#343b44; --text:#e8eaed; --dim:#8a939e;
     --idle:#5b8dbf; --armed:#d9a13b; --run:#43b06a; --fin:#b06ad9;
   }
   * { box-sizing:border-box; margin:0; padding:0; }
+  html, body { height:100%; }
   body { background:var(--bg); color:var(--text);
     font-family:"Hiragino Sans","Noto Sans JP",sans-serif;
-    height:100vh; padding:12px; display:grid;
-    grid-template-columns:1fr 360px; gap:12px; }
-  #left { min-width:0; display:flex; align-items:center; justify-content:center; }
-  #video { max-width:100%; max-height:calc(100vh - 24px);
-    border-radius:10px; border:1px solid var(--line); display:block; }
-  #right { display:flex; flex-direction:column; gap:10px; min-height:0; }
-  #statebar { padding:14px; border-radius:10px; text-align:center;
-    font-size:28px; font-weight:700; letter-spacing:2px;
+    padding:10px; display:grid; gap:10px; overflow:hidden;
+    grid-template-columns:minmax(0,1fr) clamp(240px, 24vw, 320px); }
+  #left { min-width:0; min-height:0; display:grid; gap:8px;
+    grid-template-rows:auto minmax(0,1fr) auto; }
+  #statebar { padding:8px; border-radius:10px; text-align:center;
+    font-size:24px; font-weight:700; letter-spacing:2px;
     background:var(--idle); color:#fff; transition:background .2s; }
   #statebar.ARMED { background:var(--armed); }
   #statebar.RUNNING { background:var(--run); }
   #statebar.FINISHED { background:var(--fin); }
-  #metrics { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  #videobox { min-height:0; display:flex; align-items:center; justify-content:center; }
+  #video { width:100%; height:100%; object-fit:contain; display:block;
+    border-radius:10px; background:#000; }
+  #metrics { display:grid; grid-template-columns:repeat(8, minmax(0,1fr)); gap:6px; }
   .metric { background:var(--panel); border:1px solid var(--line);
-    border-radius:10px; padding:9px 8px; text-align:center; }
-  .metric .v { font-size:24px; font-weight:700; font-variant-numeric:tabular-nums; }
-  .metric .k { font-size:11px; color:var(--dim); margin-top:2px; }
+    border-radius:8px; padding:5px 4px; text-align:center; min-width:0; }
+  .metric .v { font-size:20px; font-weight:700; font-variant-numeric:tabular-nums;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .metric .k { font-size:10px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .ok { color:var(--run); } .ng { color:#d95b5b; }
+  #right { display:flex; flex-direction:column; gap:10px; min-height:0; }
   #buttons { display:flex; flex-direction:column; gap:10px; margin-top:auto; }
-  button { padding:20px; font-size:23px; font-weight:700;
+  button { padding:16px 8px; font-size:20px; font-weight:700;
     border:none; border-radius:10px; color:#fff; cursor:pointer; }
   #btn-arm { background:var(--armed); }
   #btn-stop { background:#c94f4f; }
@@ -1301,26 +1307,29 @@ GAMEN_HTML = """<!DOCTYPE html>
   #lanebox { background:var(--panel); border:1px solid var(--line); border-radius:10px;
     padding:10px; display:flex; flex-direction:column; gap:8px; }
   #lanebox .k { font-size:12px; color:var(--dim); }
-  #lanebtns { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
-  #lanebtns button { padding:12px 4px; font-size:18px; background:#39414b; border:2px solid transparent; }
+  #lanebtns { display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; }
+  #lanebtns button { padding:10px 2px; font-size:15px; background:#39414b; border:2px solid transparent; }
   #lanebtns button.sel1 { background:#2f6fb0; border-color:#7cc1ff; }
   #lanebtns button.sel2 { background:#b0612f; border-color:#ffb27c; }
   #lanebtns button.sel0 { background:#4a525c; border-color:#aab3bd; }
-  #lanemsg { font-size:13px; color:var(--dim); min-height:18px; }
-  #result { text-align:center; font-size:16px; color:var(--dim); min-height:22px; }
+  #lanemsg { font-size:12px; color:var(--dim); min-height:16px; line-height:1.4; }
+  #result { text-align:center; font-size:15px; color:var(--dim); min-height:20px; line-height:1.4; }
   #result.warn { color:#e0b45c; font-weight:700; }
-  @media (max-width:820px) {
-    body { grid-template-columns:1fr; height:auto; }
-    #video { max-height:none; width:100%; }
+  /* 細い画面（スマホ縦など）は縦に並べてスクロール */
+  @media (max-width:760px) {
+    body { grid-template-columns:1fr; height:auto; overflow:auto; }
+    #left { grid-template-rows:auto auto auto; }
+    #video { height:auto; }
+    #metrics { grid-template-columns:repeat(4, minmax(0,1fr)); }
     #buttons { flex-direction:row; margin-top:0; }
-    button { flex:1; }
+    #buttons button { flex:1; }
   }
 </style>
 </head>
 <body>
-  <div id="left"><img id="video" src="/stream" alt="camera"></div>
-  <div id="right">
+  <div id="left">
     <div id="statebar">IDLE</div>
+    <div id="videobox"><img id="video" src="/stream" alt="camera"></div>
     <div id="metrics">
       <div class="metric"><div class="v" id="m-zure">--</div><div class="k">横ズレ [px]</div></div>
       <div class="metric"><div class="v" id="m-katamuki">--</div><div class="k">ライン傾き [°]</div></div>
@@ -1331,6 +1340,9 @@ GAMEN_HTML = """<!DOCTYPE html>
       <div class="metric"><div class="v" id="m-accel">--</div><div class="k">アクセル [%]</div></div>
       <div class="metric"><div class="v" id="m-steer">--</div><div class="k">ハンドル [%]</div></div>
     </div>
+  </div>
+  <div id="right">
+    <div id="result"></div>
     <div id="lanebox">
       <div class="k">レース出場（モニタ表示・タイム計測）</div>
       <div id="lanebtns">
@@ -1340,7 +1352,6 @@ GAMEN_HTML = """<!DOCTYPE html>
       </div>
       <div id="lanemsg"></div>
     </div>
-    <div id="result"></div>
     <div id="buttons">
       <button id="btn-arm">ARM — スタート待機</button>
       <button id="btn-stop">STOP — 停止</button>
