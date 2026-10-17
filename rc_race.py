@@ -206,6 +206,53 @@ ACCEL_RAMPU   = 20    # ★ アクセルの踏み増し速度[%/秒]
                       #   小さくする → じわっと加速（安定するが遅い）
                       #   例: 発進30% + 毎秒50% → 約1.4秒で100%に到達
                       #   （初期値では最大5%なので、発進した瞬間から5%で一定）
+                      #   直線に戻ったとき、コーナーで下げたアクセルを
+                      #   踏み戻す速さもこの値（下の「アクセルワーク」）
+
+# ------------------------------------------------------------------------------
+# 走行 —— アクセルワーク（ハンドルに合わせてアクセルを抜く・踏む）
+#
+#   人がコーナーを曲がるときと同じ操作をさせる。
+#     ハンドルを切り増す（まっすぐ→切る）  → アクセルを緩める
+#     ハンドルを切り戻す（切る→まっすぐ）  → アクセルを踏む
+#     ハンドルがほぼまっすぐ（直線）        → ACCEL_RAMPU の速さで踏み戻す
+#
+#   アクセル%
+#   ACCEL_SAIDAI ┤──┐            ┌───  直線
+#                │   ＼        ／
+#                │     ＼____／   ← コーナー中（ハンドルを保持）は下げたまま
+#   ACCEL_KAGEN  ┤ ‥‥‥‥‥‥‥‥‥‥‥  これより下げない
+#                ┼──┬────┬────┬───→ 時間
+#                  切り増し  保持  切り戻し
+#
+#   下げる量[%] = ACCEL_KIRIMASHI_GAIN × 切り増したハンドル量
+#   戻す量[%]   = ACCEL_KIRIMODOSHI_GAIN × 切り戻したハンドル量
+#   （ハンドル量は「ハンドル[%]」の目盛り。左右いっぱいが1.00）
+#   例: KIRIMASHI 8 でハンドルを0→0.5まで切る → アクセルを4%緩める
+#
+#   ゼロヨンの蛇行にも効く。左右に振れるたびに切り増しと切り戻しが
+#   くり返されるので、KIRIMASHI を KIRIMODOSHI より大きくしておくと、
+#   振れている間だけ少しずつ速度が落ち、振れが収まりやすくなる。
+#
+#   2つのゲインが0なら、これまでどおり（ハンドルに関係なく ACCEL_SAIDAI まで踏む）
+# ------------------------------------------------------------------------------
+ACCEL_KIRIMASHI_GAIN = 0     # ★ ハンドルを切り増すときにアクセルを緩める強さ（個別セッティング）
+                             #   [アクセル% / ハンドル1.00]。0=使わない
+                             #   大きくする → コーナーの入口で大きく減速する
+                             #   小さくする → 減速が少ない（速いが曲がり切れないことがある）
+                             #   目安: ACCEL_SAIDAI の5〜8割くらいから試す
+ACCEL_KIRIMODOSHI_GAIN = 0   # ★ ハンドルを切り戻すときにアクセルを踏む強さ（個別セッティング）
+                             #   [アクセル% / ハンドル1.00]。0=切り戻しでは踏まない
+                             #   （直線に戻れば ACCEL_RAMPU の速さで踏み戻す）
+                             #   大きくする → コーナーの出口で早く加速する
+                             #   KIRIMASHI より小さくしておくと、蛇行したときに減速する
+                             #   KIRIMASHI より大きくしても、ACCEL_SAIDAI は超えない
+ACCEL_KAGEN = 0              # ★ アクセルワークで下げてよい下限[%]（個別セッティング）
+                             #   コーナーで遅くなりすぎて止まる車は上げる
+                             #   （0%＝L点。動いていれば回り続けられる、いちばん弱い信号）
+CHOKUSEN_HANDORU = 0.15      # ハンドルがこの値以下なら「直線」とみなし、
+                             # 下げたアクセルを ACCEL_RAMPU の速さで踏み戻す
+                             # （ふつうは変えなくてよい）
 
 ZENKAI_HABA = 2.75    # アクセル100%のとき、0%の点から前進側へ出す信号量[%]。
                       # 基準車のエンコーダ実測（モーター回転の飽和点）で決めた値。
@@ -523,6 +570,16 @@ def me_de_miru(gazou, ato_zure=None):
 #   RUNNING が終わる条件: ゴール / ラインロスト / 時間切れ / 通信断
 # ==============================================================================
 
+def kirikata(sa_mae, sa_ima):
+    """前のコマから今のコマで、ハンドルをどれだけ切り増し・切り戻したか（どちらも0以上）
+    例: +0.2 → +0.5 は切り増し0.3 / +0.5 → +0.2 は切り戻し0.3
+        +0.2 → -0.3 は、0までの切り戻し0.2 と、反対側への切り増し0.3"""
+    if sa_mae * sa_ima < 0:                     # 中立をまたいで反対側へ切った
+        return abs(sa_ima), abs(sa_mae)
+    sa = abs(sa_ima) - abs(sa_mae)
+    return max(0.0, sa), max(0.0, -sa)
+
+
 def nou_de_handan(app, kekka, ima):
     """状態遷移と、走行中のハンドル・アクセル計算（app.lock 取得済みで呼ばれる）"""
 
@@ -534,14 +591,14 @@ def nou_de_handan(app, kekka, ima):
             app.saigo_tsushin = ima      # 発進時点から通信監視をやり直す
             app.goal_kaisu = 0
             app.rosuto_kaisu = 0
+            app.accel_gen = 0.0           # アクセルワークで下げている量[%]
+            app.accel_jikoku = None
             app.kiroku_kaishi()
             print("[脳] スタート!")
 
     elif app.state == "RUNNING":
         keika = ima - app.start_jikoku
-
-        # --- アクセル: 発進プロファイル（発進%からランプで踏み増す） ---
-        accel = min(ACCEL_SAIDAI, ACCEL_HASSHIN + ACCEL_RAMPU * keika)
+        sa_mae = app.steer_sa             # アクセルワーク用: 前のコマのハンドル
 
         # --- ハンドル: P制御(狙いのズレ) + D制御(ズレの勢い=この先の予告) ---
         # 狙い = 近くの帯のズレと遠くの帯のズレを SAKIYOMI の割合で混ぜたもの。
@@ -565,6 +622,21 @@ def nou_de_handan(app, kekka, ima):
             # （欠測をまたいで差分を取ると巨大なD値が出てハンドルが跳ねるため）
             app.zure_zenkai = None
         # (ハンドル自体は app.steer_sa を保持 = 前回の値のまま)
+
+        # --- アクセル: 発進プロファイル（発進%からランプで踏み増す） ---
+        kihon = min(ACCEL_SAIDAI, ACCEL_HASSHIN + ACCEL_RAMPU * keika)
+
+        # --- アクセルワーク: ハンドルの切り増し・切り戻しでアクセルを抜く・踏む ---
+        mashi, modoshi = kirikata(sa_mae, app.steer_sa)
+        gen = app.accel_gen
+        gen += ACCEL_KIRIMASHI_GAIN * mashi - ACCEL_KIRIMODOSHI_GAIN * modoshi
+        dt = ima - app.accel_jikoku if app.accel_jikoku else 0.0
+        app.accel_jikoku = ima
+        if abs(app.steer_sa) <= CHOKUSEN_HANDORU:
+            gen -= ACCEL_RAMPU * dt       # 直線: 発進と同じ速さで踏み戻す
+        kagen = min(ACCEL_KAGEN, kihon)   # 下限（発進直後は発進プロファイルが下限）
+        app.accel_gen = max(0.0, min(gen, kihon - kagen))
+        accel = kihon - app.accel_gen
 
         app.teashi.hashiru(app.steer_sa, accel, keika < KICK_BYO)
         app.accel = accel
@@ -1073,6 +1145,8 @@ class RaceApp:
         self.owari_riyu = ""
         self.haishin_jpeg = None
         self.accel = 0
+        self.accel_gen = 0.0         # アクセルワークで下げている量[%]
+        self.accel_jikoku = None     # アクセルワークの前回計算時刻
         self.steer_sa = 0.0
         self.saigo_tsushin = None    # 最後にブラウザから通信があった時刻
 
@@ -1132,12 +1206,15 @@ class RaceApp:
         self._csv = csv.writer(self._csv_file)
         self._csv.writerow(["時間[秒]", "横ズレ[px]", "遠くのズレ[px]", "傾き[度]",
                             "ライン", "マーク数", "ハンドル[%]", "アクセル[%]",
-                            "狙い[px]"])
+                            "狙い[px]", "アクセル減[%]"])
         # --- 設定スナップショット(この走りがどんなセッティングだったかの記録) ---
         snap = {
             "nichiji": datetime.datetime.now().isoformat(timespec="seconds"),
             "ACCEL_SAIDAI": ACCEL_SAIDAI, "ACCEL_HASSHIN": ACCEL_HASSHIN,
             "ACCEL_RAMPU": ACCEL_RAMPU,
+            "ACCEL_KIRIMASHI_GAIN": ACCEL_KIRIMASHI_GAIN,
+            "ACCEL_KIRIMODOSHI_GAIN": ACCEL_KIRIMODOSHI_GAIN,
+            "ACCEL_KAGEN": ACCEL_KAGEN, "CHOKUSEN_HANDORU": CHOKUSEN_HANDORU,
             "STEER_P_GAIN": STEER_P_GAIN, "STEER_D_GAIN": STEER_D_GAIN,
             "BRAKE": BRAKE, "SAIDAI_SOKO_BYO": SAIDAI_SOKO_BYO,
             "HANDORU_GYAKU": HANDORU_GYAKU,
@@ -1162,8 +1239,8 @@ class RaceApp:
             self._csv.writerow([f"{keika:.3f}", kekka["zure"], kekka["zure_tooku"],
                                 kekka["katamuki"], int(kekka["line_mieru"]),
                                 len(kekka.get("marks", [])),
-                                f"{self.steer_sa:+.2f}", f"{self.accel:.0f}",
-                                kekka.get("nerai")])
+                                f"{self.steer_sa:+.2f}", f"{self.accel:.1f}",
+                                kekka.get("nerai"), f"{self.accel_gen:.1f}"])
 
     def kiroku_shuryo(self):
         if self._csv_file:
